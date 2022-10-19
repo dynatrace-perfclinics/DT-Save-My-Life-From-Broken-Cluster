@@ -1,0 +1,24 @@
+kind: Schedule
+apiVersion: chaos-mesh.org/v1alpha1
+metadata:
+  namespace: otel-demo
+  name: packet-loss
+spec:
+  schedule: 5 * * * *
+  startingDeadlineSeconds: null
+  concurrencyPolicy: Allow
+  historyLimit: 1
+  type: NetworkChaos
+  networkChaos:
+    selector:
+      namespaces:
+        - otel-demo
+      labelSelectors:
+        app.kubernetes.io/name: otel-demo
+    mode: random-max-percent
+    value: '20'
+    action: loss
+    duration: 10m
+    loss:
+      loss: '15'
+    direction: to

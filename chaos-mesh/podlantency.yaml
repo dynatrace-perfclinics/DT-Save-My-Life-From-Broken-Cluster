@@ -1,0 +1,24 @@
+kind: Schedule
+apiVersion: chaos-mesh.org/v1alpha1
+metadata:
+  namespace: otel-demo
+  name: podlantency
+spec:
+  schedule: 10 * * * *
+  startingDeadlineSeconds: 50
+  concurrencyPolicy: Allow
+  historyLimit: 1
+  type: NetworkChaos
+  networkChaos:
+    selector:
+      namespaces:
+        - otel-demo
+      labelSelectors:
+        app.kubernetes.io/name: otel-demo
+    mode: random-max-percent
+    value: '30'
+    action: delay
+    duration: 15m
+    delay:
+      latency: 50ms
+    direction: to

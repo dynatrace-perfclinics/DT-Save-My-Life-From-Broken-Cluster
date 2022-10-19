@@ -1,0 +1,16 @@
+kind: Service
+apiVersion: v1
+metadata:
+  name: linkerd-metrics
+  namespace: linkerd
+  annotations:
+    metrics.dynatrace.com/port: '4191'
+    metrics.dynatrace.com/scrape: 'true'
+    metrics.dynatrace.com/path: '/metrics'
+spec:
+  ports:
+    - name: dynatrace-monitoring-linkerd
+      port: 9220
+  selector:
+    linkerd.io/control-plane-ns: linkerd
+  clusterIP: None

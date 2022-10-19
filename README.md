@@ -1,0 +1,252 @@
+# Observability clinic - Last Night Dynatrace Save my life from a broken Cluster
+Repository containing the files for the Observability Clinic related to the latest update on K8s
+
+
+This repository showcase the usage of the Dynatrace k8s monitoring by using GKE with :
+- the OpenTelemtry Demo application
+- the OpenTelemtry collector
+- Linkerd  
+- Hipster-shop
+
+## Prerequisite
+The following tools need to be install on your machine :
+- jq
+- kubectl
+- git
+- gcloud ( if you are using GKE)
+- Helm
+
+
+If you don't have any dynatrace tenant , then let's [start a trial on Dynatrace](https://bit.ly/3KxWDvY)
+
+## Deployment Steps in GCP
+
+You will first need a Kubernetes cluster with 4 Nodes.
+You can either deploy on Minikube or K3s or follow the instructions to create GKE cluster:
+### 1.Create a Google Cloud Platform Project
+```
+PROJECT_ID="<your-project-id>"
+gcloud services enable container.googleapis.com --project ${PROJECT_ID}
+gcloud services enable monitoring.googleapis.com \
+    cloudtrace.googleapis.com \
+    clouddebugger.googleapis.com \
+    cloudprofiler.googleapis.com \
+    --project ${PROJECT_ID}
+```
+### 2.Create a GKE cluster
+```
+ZONE=europe-west3-a
+gcloud container clusters create dtobservabilityclinic \
+--project=${PROJECT_ID} --zone=${ZONE} \
+--machine-type=e2-standard-4 --num-nodes=4
+```
+
+### 3.Clone the Github Repository
+```
+git clone https://github.com/isItObservable/Linkerd
+cd Linkerd
+```
+### 4.Deploy Nginx Ingress Controller
+```
+helm upgrade --install ingress-nginx ingress-nginx \
+  --repo https://kubernetes.github.io/ingress-nginx \
+  --namespace ingress-nginx --create-namespace
+```
+#### 1. get the ip adress of the ingress gateway
+Since we are using Ingress controller to route the traffic , we will need to get the public ip adress of our ingress.
+With the public ip , we would be able to update the deployment of the ingress for :
+* otel-demo
+* hipster-shop
+```
+IP=$(kubectl get svc ingress-nginx-controller -n ingress-nginx -ojson | jq -j '.status.loadBalancer.ingress[].ip')
+```
+#### 2. Update the manifest files
+
+update the following files to update the ingress definitions :
+```
+sed -i "s,IP_TO_REPLACE,$IP," kubernetes-manifests/K8sdemo.yaml
+sed -i "s,IP_TO_REPLACE,$IP," hipster-shop/deployment.yaml
+
+```
+
+### 6.Dynatrace
+#### 1. Dynatrace Tenant - start a trial
+If you don't have any Dyntrace tenant , then i suggest to create a trial using the following link : [Dynatrace Trial](https://bit.ly/3KxWDvY)
+Once you have your Tenant save the Dynatrace (including https) tenant URL in the variable `DT_TENANT_URL` (for example : https://dedededfrf.live.dynatrace.com)
+```
+DT_TENANT_URL=<YOUR TENANT URL>
+```
+
+
+#### 2. Create the Dynatrace API Tokens
+The dynatrace operator will require to have several tokens:
+* Token to deploy and configure the various components
+* Token to ingest metrics and Traces
+
+##### Token to deploy
+Create a Dynatrace token ( left menu Access TOken/Create a new token), this token requires to have the following scope:
+* Create ActiveGate tokens
+* Read entities
+* Read Settings
+* Write Settings
+* Access problem and event feed, metrics and topology
+* Read configuration
+* Write configuration
+* Paas integration - installer downloader
+<p align="center"><img src="/image/operator_token.png" width="40%" alt="operator token" /></p>
+
+Save the value of the token . We will use it later to store in a k8S secret
+```
+DYNATRACE_API_TOKEN=<YOUR TOKEN VALUE>
+```
+##### Token to ingest data
+Create a Dynatrace token with the following scope:
+* ingest metrics
+* ingest OpenTelemetry traces
+<p align="center"><img src="/image/data_ingest.png" width="40%" alt="data token" /></p>
+Save the value of the token . We will use it later to store in a k8S secret
+
+```
+DATA_INGEST_TOKEN=<YOUR TOKEN VALUE>
+```
+
+##### Create the k8s secret for our tokenks
+```
+kubectl create namespace dynatrace
+kubectl -n dynatrace create secret generic dynakube --from-literal="apiToken=$DYNATRACE_API_TOKEN" --from-literal="dataIngestToken=$DATA_INGEST_TOKEN"
+```
+#### 3. Deploy deploy the Dynatrace operator
+```
+kubectl apply -f https://github.com/Dynatrace/dynatrace-operator/releases/latest/download/kubernetes.yaml
+kubectl apply -f https://github.com/Dynatrace/dynatrace-operator/releases/latest/download/kubernetes-csi.yaml
+```
+Update the Dynakube CRD with your tenant url:
+```
+sed -i 's,TENANTURL_TOREPLACE,$DT_TENANT_URL,' dynatrace/dynakube.yaml
+kubectl apply -f dynatrace/dynakube.yaml
+```
+
+
+### 6.Deploy OpenTelemetry Operator
+
+#### 1. Cert-Manager
+The OpenTelemetry operator requires to deploy the Cert-manager :
+```
+kubectl apply -f https://github.com/cert-manager/cert-manager/releases/download/v1.8.2/cert-manager.yaml
+```
+#### 2. OpenTelemetry Operator
+```
+kubectl apply -f https://github.com/open-telemetry/opentelemetry-operator/releases/latest/download/opentelemetry-operator.yaml
+```
+
+### 7. Configure the OpenTelemetry Collector
+
+#### Requirements
+To be able to ingest the Distributed traces generated by the Online Boutique , it would be requried to modify `openTelemetry-manifest.yaml`  with
+- your Dynatrace Tenant URL ( your dynatrace url would be `https://<TENANTID>.live.dynatrace.com` )
+- A dynatrace datainges API token
+
+
+#### Udpate the openTelemetry manifest file
+```
+
+CLUSTERID=$(kubectl get namespace kube-system -o jsonpath='{.metadata.uid}')
+sed -i "s,CLUSTER_ID_TO_REPLACE,$CLUSTERID," kubernetes-manifests/openTelemetry-sidecar.yaml
+sed -i "s,TENANTURL_TOREPLACE,$DT_TENANT_URL," kubernetes-manifests/openTelemetry-manifest.yaml
+sed -i "s,TENANTURL_TOREPLACE,$DT_TENANT_URL," hipster-shop/deployment.yaml
+sed -i "s,DT_API_TOKEN_TO_REPLACE,$DATA_INGEST_TOKEN," kubernetes-manifests/openTelemetry-manifest.yaml
+sed -i "s,DT_API_TOKEN_TO_REPLACE,$DATA_INGEST_TOKEN," hipster-shop/deployment.yaml
+```
+#### Deploy the OpenTelemetry Collector
+```
+kubectl apply -f kubernetes-manifests/rbac.yaml
+kubectl apply -f kubernetes-manifests/openTelemetry-manifest.yaml
+```
+### 8. Deploy Linkerd
+
+#### Install the CLI
+To install the CLI manually, run:
+```
+curl --proto '=https' --tlsv1.2 -sSfL https://run.linkerd.io/install | sh
+```
+Once installed, verify the CLI is running correctly with:
+```
+linkerd version
+```
+#### Validate your k8s cluster
+To check that your cluster is ready to install Linkerd, run:
+```
+linkerd check --pre
+```
+#### Install the Linkerd CRDs
+```
+linkerd install --crds | kubectl apply -f -
+```
+#### Install the control plane onto your cluster
+```
+linkerd install | kubectl apply -f -
+```
+#### Annotate the default  namespace
+```
+kubectl annotate namespaces default linkerd.io/inject=enabled
+```
+### 9. Deploy the hipster-shop
+```
+VERSION=v0.6.0-beta
+kubectl create ns otel-demo
+sed -i "s,VERSION_TO_REPLACE,$VERSION," kubernetes-manifests/K8sdemo.yaml
+kubectl annotate namespaces otel-demo linkerd.io/inject=enabled
+kubectl annotate ns otel-demo chaos-mesh.org/inject=enabled
+kubectl apply -f kubernetes-manifests/openTelemetry-sidecar.yaml -n otel-demo
+kubectl apply -f kubernetes-manifests/K8sdemo.yaml -n otel-demo
+```
+### 10. Collect Linkerd metrics
+
+#### Deploy the service to collectd linkerd metrics
+```
+kubectl apply -f linkerd/service.yaml 
+```
+### 11. Deploy ChaosMesh
+
+#### Deploy the service to collectd linkerd metrics
+for GKE
+```
+helm repo add chaos-mesh https://charts.chaos-mesh.org
+kubectl create ns chaos-testing
+helm install chaos-mesh chaos-mesh/chaos-mesh -n=chaos-testing --version 2.3.1 --set chaosDaemon.hostNetwork=true --set chaosDaemon.runtime=containerd --set controllerManager.enableFilterNamespace=true  --set dashboard.ingress.enabled=true --set dashboard.ingress.hosts[0].name="chaos.$IP.nip.io" --set dashboard.create=true --set dashboard.ingress.ingressClassName=nginx --set chaosDaemon.socketPath=/run/containerd/containerd.sock
+kubectl wait pod -l app.kubernetes.io/component=chaos-daemon -n chaos-testing --for=condition=Ready --timeout=2m
+kubectl apply -f chaos-mesh/rbac_viewer.yaml -n otel-demo
+kubectl apply -f chaos-mesh/rbac_manager.yaml -n otel-demo
+```
+
+for k3s
+```
+helm install chaos-mesh chaos-mesh/chaos-mesh -n=chaos-testing --set chaosDaemon.runtime=containerd --set chaosDaemon.socketPath=/run/k3s/containerd/containerd.sock --version 2.4.1 --set controllerManager.enableFilterNamespace=true  --set dashboard.ingress.enabled=true --set dashboard.ingress.hosts[0].name="chaos.$IP.nip.io" --set dashboard.create=true --set dashboard.ingress.ingressClassName=nginx
+```
+
+
+#### Get the manager token:
+```
+MANAGER_SECRET_NAME=$(kubectl get secrets -n otel-demo -o=jsonpath='{.items[?(@.metadata.annotations.kubernetes\.io/service-account\.name=="account-otel-demo-manager")].metadata.name}')
+MANAGER_SECRET_TOKEN=$(kubectl get secrets $MANAGER_SECRET_NAME -n otel-demo -o  jsonpath="{.data.token}")
+echo "Chaos Mesh Url: http://chaos.$IP.nip.io"
+echo "Manager SA:  account-otel-demo-manager"
+echo "Manager Token: $MANAGER_SECRET_TOKEN"
+```
+Connect to Chaos Mesh and shedule the various experiments stored in the chaos-mesh folder
+
+### 12. Deploy Hipster-shop
+```
+kubectl create ns hipster-shop
+kubectl annotate namespaces hipster-shop linkerd.io/inject=enabled
+kubectl annotate ns hipster-shop chaos-mesh.org/inject=enabled
+kubectl apply -f hipster-shop/deployment.yaml -n hipster-shop
+```
+
+### 13. Deploy Kepler
+```
+kubectl apply -f kepler/deploy.yaml
+```
+The Dashboard presented in the Observability clinic is available in dynatrace/Power Consumption.json
+
+
